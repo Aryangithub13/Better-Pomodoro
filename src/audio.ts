@@ -53,6 +53,8 @@ export class AmbientEngine {
   private wantedLevel: Record<ChannelKey, number>;
   private wantedOn: Partial<Record<ChannelKey, boolean>> = {};
   private guarded = false;
+  /* true while the timer is paused — nothing may sound until released */
+  private held = false;
 
   constructor() {
     this.wantedLevel = Object.fromEntries(ALL_CHANNELS.map((k) => [k, 0])) as Record<

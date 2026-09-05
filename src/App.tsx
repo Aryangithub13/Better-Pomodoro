@@ -792,7 +792,13 @@ export default function App() {
           </button>
           <button
             className="ctl primary"
-            onClick={toggle}
+            onClick={(e) => {
+              toggle();
+              /* a real mouse click (detail > 0) releases focus afterwards so
+                 the spacebar keeps routing through the global toggle instead
+                 of the focused button's native keyup activation */
+              if (e.detail > 0) e.currentTarget.blur();
+            }}
             aria-label={running ? "Pause timer" : "Start timer"}
           >
             <svg className="ic-play" viewBox="0 0 24 24" aria-hidden="true">
