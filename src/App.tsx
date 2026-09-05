@@ -6,6 +6,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { ambient, type ChannelKey } from "./audio";
+import { loadLog, recordFocus, type LogEntry } from "./stats";
+import { AmbientCanvas } from "./AmbientCanvas";
+import { Plant, type PlantPhase } from "./Plant";
+import { StatsPanel } from "./StatsPanel";
+import { usePip } from "./usePip";
+import { useWakeLock } from "./useWakeLock";
 
 /* ================================================================
    PF-25 — a split-flap pomodoro instrument.
@@ -19,14 +26,27 @@ interface Settings {
   focus: number;
   short: number;
   long: number;
-  /* one round = one focus + one short break; the long break follows the final round */
   rounds: number;
   sound: boolean;
+  ambienceOn: boolean;
+  rain: number;
+  drone: number;
+  wind: number;
 }
 
-const DEFAULTS: Settings = { focus: 25, short: 5, long: 15, rounds: 4, sound: true };
+const DEFAULTS: Settings = {
+  focus: 25,
+  short: 5,
+  long: 15,
+  rounds: 4,
+  sound: true,
+  ambienceOn: false,
+  rain: 0.45,
+  drone: 0.25,
+  wind: 0.3,
+};
 
-const LIMITS: Record<keyof Omit<Settings, "sound">, [number, number]> = {
+const LIMITS: Record<"focus" | "short" | "long" | "rounds", [number, number]> = {
   focus: [1, 90],
   short: [1, 30],
   long: [1, 45],
@@ -39,10 +59,17 @@ const LABEL: Record<Mode, string> = {
   long: "Long break",
 };
 
+const MIXER: { key: ChannelKey; label: string }[] = [
+  { key: "rain", label: "Rain" },
+  { key: "drone", label: "Deep drone" },
+  { key: "wind", label: "Wind" },
+];
+
 const STORAGE_KEY = "pomo.pf25.v1";
 
 const pad = (n: number) => (n < 10 ? "0" : "") + n;
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const clamp01 = (v: number) => clamp(v, 0, 1);
 
 function loadSettings(): Settings {
   const s: Settings = { ...DEFAULTS };
@@ -56,11 +83,20 @@ function loadSettings(): Settings {
           s[k] = clamp(Math.round(v), LIMITS[k][0], LIMITS[k][1]);
         }
       });
-      /* older builds stored the cycle length as "longEvery" — carry it over */
-      if (j.rounds == null && typeof j.longEvery === "number" && Number.isFinite(j.longEvery)) {
+      /* migrate the older "long break after" preference into rounds */
+      if (
+        j.rounds === undefined &&
+        typeof j.longEvery === "number" &&
+        Number.isFinite(j.longEvery)
+      ) {
         s.rounds = clamp(Math.round(j.longEvery), LIMITS.rounds[0], LIMITS.rounds[1]);
       }
       s.sound = j.sound !== false;
+      s.ambienceOn = j.ambienceOn === true;
+      (["rain", "drone", "wind"] as const).forEach((k) => {
+        const v = j[k];
+        if (typeof v === "number" && Number.isFinite(v)) s[k] = clamp01(v);
+      });
     }
   } catch {
     /* private mode — run on defaults */
@@ -147,8 +183,7 @@ function FlipDigit({
   const flapTop = flipping ? anim.from : display;
   const flapBottom = flipping ? anim.to : display;
 
-  const unitClass =
-    "unit" + (flipping ? " flipping" : "") + (fast ? " fast" : "");
+  const unitClass = "unit" + (flipping ? " flipping" : "") + (fast ? " fast" : "");
 
   return (
     <div className={unitClass} aria-hidden="true">
@@ -206,6 +241,20 @@ const CloseIcon = () => (
 );
 const MinusIcon = () => icon("M5 12h14");
 const PlusIcon = () => icon("M12 5v14M5 12h14");
+const StatsIcon = () => icon("M6 20v-5", <path d="M12 20v-9M18 20V7" />);
+const PipIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="3" y="5" width="18" height="14" rx="2.5" />
+    <rect x="12.6" y="12" width="6" height="4.4" rx="1" fill="currentColor" stroke="none" />
+  </svg>
+);
 
 /* ================================================================
    App
@@ -218,7 +267,10 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [completedFocus, setCompletedFocus] = useState(0);
   const [scrimOpen, setScrimOpen] = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
+  const [log, setLog] = useState<LogEntry[]>(loadLog);
   const [everRun, setEverRun] = useState(false);
+  const [plantPhase, setPlantPhase] = useState<PlantPhase>("grow");
   const [bootChars, setBootChars] = useState<string[] | null>(null);
   const [reduced, setReduced] = useState(
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
@@ -228,10 +280,29 @@ export default function App() {
   const audioCtxRef = useRef<AudioContext | null>(null);
 
   /* latest-value mirror so engine callbacks never read stale state */
-  const stateRef = useRef({ mode, settings, completedFocus, total, remaining, running });
-  useEffect(() => {
-    stateRef.current = { mode, settings, completedFocus, total, remaining, running };
+  const stateRef = useRef({
+    mode,
+    settings,
+    completedFocus,
+    total,
+    remaining,
+    running,
+    plantPhase,
   });
+  useEffect(() => {
+    stateRef.current = {
+      mode,
+      settings,
+      completedFocus,
+      total,
+      remaining,
+      running,
+      plantPhase,
+    };
+  });
+
+  /* screen stays awake while a block runs */
+  useWakeLock(running);
 
   /* ------------------------------ audio ------------------------------ */
   const ensureAudio = useCallback(() => {
@@ -240,7 +311,9 @@ export default function App() {
       return;
     }
     try {
-      const AC = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      const AC =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (AC) audioCtxRef.current = new AC();
     } catch {
       audioCtxRef.current = null;
@@ -252,10 +325,12 @@ export default function App() {
     const ctx = audioCtxRef.current;
     if (!ctx) return;
     const t0 = ctx.currentTime;
-    ([
-      [587.33, 0],
-      [392, 0.22],
-    ] as const).forEach(([freq, at]) => {
+    (
+      [
+        [587.33, 0],
+        [392, 0.22],
+      ] as const
+    ).forEach(([freq, at]) => {
       const o = ctx.createOscillator();
       const g = ctx.createGain();
       o.type = "sine";
@@ -278,12 +353,10 @@ export default function App() {
     let nextMode: Mode;
     let nextCompleted = s.completedFocus;
     if (s.mode === "focus") {
-      /* a round is focus + rest, so every focus is followed by its short break */
       nextCompleted += 1;
-      nextMode = "short";
-    } else if (s.mode === "short") {
-      /* the long break comes only after the final round's rest is done */
-      nextMode = nextCompleted % s.settings.rounds === 0 ? "long" : "focus";
+      setLog(recordFocus(s.settings.focus));
+      setPlantPhase("bloom");
+      nextMode = nextCompleted % s.settings.rounds === 0 ? "long" : "short";
     } else {
       nextMode = "focus";
     }
@@ -292,16 +365,14 @@ export default function App() {
     setMode(nextMode);
     setTotal(newTotal);
     setRemaining(newTotal);
-    const r = s.settings.rounds;
-    const roundNow =
-      nextMode === "short"
-        ? ((nextCompleted - 1) % r) + 1
-        : nextMode === "long"
-          ? r
-          : (nextCompleted % r) + 1;
-    announce(
-      `${LABEL[nextMode]} — round ${roundNow} of ${r}. ${s.settings[nextMode]} minutes. Press space to start.`,
-    );
+    if (nextMode === "focus") {
+      const r = (nextCompleted % s.settings.rounds) + 1;
+      announce(`Focus — round ${r} of ${s.settings.rounds}. Press space to start.`);
+    } else if (nextMode === "short") {
+      announce(`Short break — round ${nextCompleted} of ${s.settings.rounds} complete.`);
+    } else {
+      announce(`Long break — ${s.settings.rounds} rounds complete.`);
+    }
   }, [chime]);
 
   useEffect(() => {
@@ -324,6 +395,8 @@ export default function App() {
     setEverRun(true);
     const s = stateRef.current;
     const rem = s.remaining <= 0 ? s.total : s.remaining;
+    /* a fresh focus block plants a new seed */
+    if (s.mode === "focus" && rem >= s.total) setPlantPhase("grow");
     endAtRef.current = Date.now() + rem;
     setRemaining(rem);
     setRunning(true);
@@ -345,28 +418,41 @@ export default function App() {
     const t = s.settings[s.mode] * 60000;
     setTotal(t);
     setRemaining(t);
+    if (s.mode === "focus") {
+      const p = s.total > 0 ? 1 - s.remaining / s.total : 0;
+      setPlantPhase(p > 0.06 && s.plantPhase !== "bloom" ? "wilt" : "grow");
+    }
     announce(`${LABEL[s.mode]} reset. ${s.settings[s.mode]} minutes ready.`);
   }, []);
 
   /* ------------------------------ settings ------------------------------ */
-  const changeSetting = useCallback(
-    (key: keyof typeof LIMITS, delta: number) => {
-      const s = stateRef.current;
-      const [lo, hi] = LIMITS[key];
-      const val = clamp(s.settings[key] + delta, lo, hi);
-      setSettings({ ...s.settings, [key]: val });
-      if (!s.running && key === s.mode) {
-        const t = val * 60000;
-        setTotal(t);
-        setRemaining(t);
-      }
-    },
-    [],
-  );
+  const changeSetting = useCallback((key: keyof typeof LIMITS, delta: number) => {
+    const s = stateRef.current;
+    const [lo, hi] = LIMITS[key];
+    const val = clamp(s.settings[key] + delta, lo, hi);
+    setSettings({ ...s.settings, [key]: val });
+    if (!s.running && key === s.mode) {
+      const t = val * 60000;
+      setTotal(t);
+      setRemaining(t);
+    }
+  }, []);
+
+  const setMixer = useCallback((key: ChannelKey, v01: number) => {
+    setSettings((s) => ({ ...s, [key]: clamp01(v01) }));
+  }, []);
 
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  /* ambience follows the persisted mix */
+  useEffect(() => {
+    ambient.setEnabled(settings.ambienceOn);
+  }, [settings.ambienceOn]);
+  useEffect(() => {
+    MIXER.forEach(({ key }) => ambient.setLevel(key, settings[key]));
+  }, [settings.rain, settings.drone, settings.wind]);
 
   /* ------------------------------ side channels ------------------------------ */
   useEffect(() => {
@@ -391,7 +477,7 @@ export default function App() {
     return () => mq.removeEventListener("change", fn);
   }, []);
 
-  /* keyboard: space toggles, R resets, Esc closes settings */
+  /* keyboard: space toggles, R resets, Esc closes panels */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -402,15 +488,16 @@ export default function App() {
         if (tag === "button") return; /* let a focused button keep native space */
         e.preventDefault();
         toggle();
-      } else if ((e.key === "r" || e.key === "R") && !typing && !scrimOpen) {
+      } else if ((e.key === "r" || e.key === "R") && !typing && !scrimOpen && !statsOpen) {
         reset();
-      } else if (e.key === "Escape" && scrimOpen) {
+      } else if (e.key === "Escape") {
         setScrimOpen(false);
+        setStatsOpen(false);
       }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [toggle, reset, scrimOpen]);
+  }, [toggle, reset, scrimOpen, statsOpen]);
 
   /* re-sync instantly when the tab wakes from background throttling */
   useEffect(() => {
@@ -470,21 +557,29 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ------------------------------ render ------------------------------ */
+  /* ------------------------------ derived ------------------------------ */
   const secs = Math.max(0, Math.ceil(remaining / 1000));
-  const chars = (pad(Math.floor(secs / 60)) + pad(secs % 60)).split("");
+  const mm = pad(Math.floor(secs / 60));
+  const ss = pad(secs % 60);
+  const chars = (mm + ss).split("");
   const shown = bootChars ?? chars;
   const progress = total > 0 ? (1 - remaining / total) * 100 : 0;
 
-  /* round bookkeeping — one round = focus + short break */
-  const rounds = settings.rounds;
-  const currentRound =
-    mode === "focus"
-      ? (completedFocus % rounds) + 1
-      : mode === "short"
-        ? ((((completedFocus - 1) % rounds) + rounds) % rounds) + 1
-        : rounds;
-  const dotsFilled = mode === "focus" ? currentRound - 1 : currentRound;
+  const dotsFilled = mode === "long" ? settings.rounds : completedFocus % settings.rounds;
+  const roundTag =
+    mode === "long"
+      ? `${settings.rounds} / ${settings.rounds}`
+      : `${(completedFocus % settings.rounds) + 1} / ${settings.rounds}`;
+
+  const plantProgress = mode === "focus" ? (total > 0 ? 1 - remaining / total : 0) : 1;
+
+  const pip = usePip({
+    mm,
+    ss,
+    label: LABEL[mode],
+    progress: progress / 100,
+    running,
+  });
 
   const numericRows = [
     { key: "focus" as const, label: "Focus length", unit: "min" },
@@ -493,142 +588,207 @@ export default function App() {
     { key: "long" as const, label: "Long break", unit: "min" },
   ];
 
+  /* ------------------------------ render ------------------------------ */
   return (
-    <main className="stage">
-      {/* the instrument */}
-      <section className="board-frame" role="timer" aria-label="Pomodoro countdown timer">
-        <div className="units">
-          <FlipDigit char={shown[0]} reduced={reduced} fast={bootChars !== null} />
-          <FlipDigit char={shown[1]} reduced={reduced} fast={bootChars !== null} />
-          <div className="colon" aria-hidden="true">
-            <i />
-            <i />
+    <>
+      <AmbientCanvas mode={mode} running={running} reduced={reduced} />
+
+      <main className="stage">
+        {/* the instrument */}
+        <div className="clock-row">
+          <section className="board-frame" role="timer" aria-label="Pomodoro countdown timer">
+            {pip.supported && (
+              <button
+                className="pip-btn"
+                onClick={() => void pip.toggle()}
+                aria-pressed={pip.active}
+                aria-label="Floating timer window"
+                title="Floating window"
+              >
+                <PipIcon />
+              </button>
+            )}
+            <div className="units">
+              <FlipDigit char={shown[0]} reduced={reduced} fast={bootChars !== null} />
+              <FlipDigit char={shown[1]} reduced={reduced} fast={bootChars !== null} />
+              <div className="colon" aria-hidden="true">
+                <i />
+                <i />
+              </div>
+              <FlipDigit char={shown[2]} reduced={reduced} fast={bootChars !== null} />
+              <FlipDigit char={shown[3]} reduced={reduced} fast={bootChars !== null} />
+            </div>
+            <div className="rule" aria-hidden="true">
+              <span style={{ width: `${progress}%` }} />
+            </div>
+          </section>
+
+          {/* the companion — grows with each focus block */}
+          <div className="plant-col" aria-hidden="true">
+            <Plant progress={plantProgress} phase={plantPhase} />
           </div>
-          <FlipDigit char={shown[2]} reduced={reduced} fast={bootChars !== null} />
-          <FlipDigit char={shown[3]} reduced={reduced} fast={bootChars !== null} />
         </div>
-        <div className="rule" aria-hidden="true">
-          <span style={{ width: `${progress}%` }} />
+
+        {/* session readout */}
+        <div className="readout">
+          <span>{LABEL[mode]}</span>
+          <span className="round-tag">round {roundTag}</span>
+          <span className="dots" aria-hidden="true">
+            {Array.from({ length: settings.rounds }, (_, i) => (
+              <i key={i} className={i < dotsFilled ? "on" : ""} />
+            ))}
+          </span>
         </div>
-      </section>
 
-      {/* session readout */}
-      <div className="readout">
-        <span>{LABEL[mode]}</span>
-        <span className="dots" aria-hidden="true">
-          {Array.from({ length: rounds }, (_, i) => (
-            <i key={i} className={i < dotsFilled ? "on" : ""} />
-          ))}
-        </span>
-        <span className="roundtag">
-          round {currentRound} / {rounds}
-        </span>
-      </div>
+        {/* quiet control row */}
+        <div className="controls">
+          <button
+            className="ctl"
+            onClick={() => setStatsOpen(true)}
+            aria-label="Open focus log"
+            title="Focus log"
+          >
+            <StatsIcon />
+          </button>
+          <button className="ctl" onClick={reset} aria-label="Reset timer" title="Reset (R)">
+            <ResetIcon />
+          </button>
+          <button
+            className="ctl primary"
+            onClick={toggle}
+            aria-label={running ? "Pause timer" : "Start timer"}
+          >
+            <svg className="ic-play" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8.5 5.4v13.2L19 12z" fill="currentColor" />
+            </svg>
+            <svg className="ic-pause" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M8.5 5.5v13M15.5 5.5v13"
+                stroke="currentColor"
+                strokeWidth="2.6"
+                strokeLinecap="round"
+                fill="none"
+              />
+            </svg>
+          </button>
+          <button
+            className="ctl"
+            onClick={() => setScrimOpen(true)}
+            aria-label="Open settings"
+            aria-expanded={scrimOpen}
+            title="Settings"
+          >
+            <GearIcon />
+          </button>
+        </div>
 
-      {/* quiet control row */}
-      <div className="controls">
-        <button className="ctl" onClick={reset} aria-label="Reset timer" title="Reset (R)">
-          <ResetIcon />
-        </button>
-        <button
-          className="ctl primary"
-          onClick={toggle}
-          aria-label={running ? "Pause timer" : "Start timer"}
+        <p className="plate">PF-25 split-flap timer — space to start or pause</p>
+
+        <div className="sr-only" id="announcer" aria-live="polite" />
+
+        {/* settings */}
+        <div
+          className={"scrim" + (scrimOpen ? " open" : "")}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setScrimOpen(false);
+          }}
         >
-          <svg className="ic-play" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M8.5 5.4v13.2L19 12z" fill="currentColor" />
-          </svg>
-          <svg className="ic-pause" viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M8.5 5.5v13M15.5 5.5v13"
-              stroke="currentColor"
-              strokeWidth="2.6"
-              strokeLinecap="round"
-              fill="none"
-            />
-          </svg>
-        </button>
-        <button
-          className="ctl"
-          onClick={() => setScrimOpen(true)}
-          aria-label="Open settings"
-          aria-expanded={scrimOpen}
-          title="Settings"
-        >
-          <GearIcon />
-        </button>
-      </div>
+          <div className="panel" role="dialog" aria-modal="true" aria-labelledby="pTitle">
+            <div className="p-head">
+              <h2 id="pTitle">Timing</h2>
+              <button className="x" onClick={() => setScrimOpen(false)} aria-label="Close settings">
+                <CloseIcon />
+              </button>
+            </div>
 
-      <p className="plate">PF-25 split-flap timer — space to start or pause</p>
+            {numericRows.map(({ key, label, unit }) => {
+              const [lo, hi] = LIMITS[key];
+              const val = settings[key];
+              return (
+                <div className="row" key={key}>
+                  <span className="lbl">{label}</span>
+                  <div className="stepper">
+                    <button
+                      className="stp"
+                      onClick={() => changeSetting(key, -1)}
+                      disabled={val <= lo}
+                      aria-label={`Decrease ${label}`}
+                    >
+                      <MinusIcon />
+                    </button>
+                    <output>
+                      {val}
+                      {unit && <span className="u">{unit}</span>}
+                    </output>
+                    <button
+                      className="stp"
+                      onClick={() => changeSetting(key, 1)}
+                      disabled={val >= hi}
+                      aria-label={`Increase ${label}`}
+                    >
+                      <PlusIcon />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
 
-      <div className="sr-only" id="announcer" aria-live="polite" />
+            <div className="row">
+              <span className="lbl">Signal tone</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.sound}
+                  onChange={(e) => setSettings((s) => ({ ...s, sound: e.target.checked }))}
+                />
+                <span className="tr" />
+                <span className="sr-only">Signal tone on session end</span>
+              </label>
+            </div>
 
-      {/* settings */}
-      <div
-        className={"scrim" + (scrimOpen ? " open" : "")}
-        onClick={(e) => {
-          if (e.target === e.currentTarget) setScrimOpen(false);
-        }}
-      >
-        <div className="panel" role="dialog" aria-modal="true" aria-labelledby="pTitle">
-          <div className="p-head">
-            <h2 id="pTitle">Timing</h2>
-            <button className="x" onClick={() => setScrimOpen(false)} aria-label="Close settings">
-              <CloseIcon />
-            </button>
-          </div>
+            <div className="p-sub">
+              <h3>Ambience</h3>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={settings.ambienceOn}
+                  onChange={(e) => setSettings((s) => ({ ...s, ambienceOn: e.target.checked }))}
+                />
+                <span className="tr" />
+                <span className="sr-only">Ambient sound on</span>
+              </label>
+            </div>
 
-          {numericRows.map(({ key, label, unit }) => {
-            const [lo, hi] = LIMITS[key];
-            const val = settings[key];
-            return (
-              <div className="row" key={key}>
+            {MIXER.map(({ key, label }) => (
+              <div className="row mix-row" key={key}>
                 <span className="lbl">{label}</span>
-                <div className="stepper">
-                  <button
-                    className="stp"
-                    onClick={() => changeSetting(key, -1)}
-                    disabled={val <= lo}
-                    aria-label={`Decrease ${label}`}
-                  >
-                    <MinusIcon />
-                  </button>
-                  <output>
-                    {val}
-                    {unit ? <span className="u">{unit}</span> : null}
+                <div className="mixer">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(settings[key] * 100)}
+                    onChange={(e) => setMixer(key, Number(e.target.value) / 100)}
+                    aria-label={`${label} volume`}
+                  />
+                  <output className="mix-val">
+                    {Math.round(settings[key] * 100)}
+                    <span className="u">%</span>
                   </output>
-                  <button
-                    className="stp"
-                    onClick={() => changeSetting(key, 1)}
-                    disabled={val >= hi}
-                    aria-label={`Increase ${label}`}
-                  >
-                    <PlusIcon />
-                  </button>
                 </div>
               </div>
-            );
-          })}
+            ))}
 
-          <div className="row">
-            <span className="lbl">Signal tone</span>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={settings.sound}
-                onChange={(e) => setSettings((s) => ({ ...s, sound: e.target.checked }))}
-              />
-              <span className="tr" />
-              <span className="sr-only">Signal tone on session end</span>
-            </label>
+            <p className="p-note">
+              One round = focus + short break; the long break follows the final round.
+              Lengths apply to the next session of that kind. Saved on this device.
+            </p>
           </div>
-
-          <p className="p-note">
-            One round = focus + short break; the long break follows the final round.
-            Lengths apply to the next session of that kind. Saved on this device.
-          </p>
         </div>
-      </div>
-    </main>
+
+        {/* focus log */}
+        <StatsPanel open={statsOpen} log={log} onClose={() => setStatsOpen(false)} />
+      </main>
+    </>
   );
 }
