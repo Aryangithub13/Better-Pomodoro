@@ -10,16 +10,26 @@
             brown (−6 dB/oct integrator), blue (+3 dB/oct tilt),
             violet (+6 dB/oct derivative).
 
-   Autoplay policies are hostile: the context is created lazily and
-   `wake()` must be called from inside a user gesture (a click or
-   drag) so resume() lands inside the activation window. A
-   statechange/visibility guard re-wakes it after device sleep or
-   tab backgrounding.
+   Autoplay-safe by construction: no AudioContext, buffer or node
+   exists until `wake()` runs inside a user gesture. Until then,
+   setChannelOn / setLevel only record intent; wake() materialises
+   it, and the guards keep it alive across sleep/backgrounding.
    ================================================================ */
 
 export type SceneKey = "rain" | "drone" | "wind";
 export type NoiseColor = "white" | "pink" | "brown" | "blue" | "violet";
 export type ChannelKey = SceneKey | NoiseColor;
+
+export const ALL_CHANNELS: ChannelKey[] = [
+  "rain",
+  "drone",
+  "wind",
+  "white",
+  "pink",
+  "brown",
+  "blue",
+  "violet",
+];
 
 const MAX_GAIN: Record<ChannelKey, number> = {
   rain: 0.9,
@@ -40,9 +50,20 @@ export class AmbientEngine {
   private gains: Partial<Record<ChannelKey, GainNode>> = {};
   private built: Partial<Record<ChannelKey, boolean>> = {};
   private buffers: Partial<Record<NoiseColor, AudioBuffer>> = {};
-  private enabled = false;
+  private wantedLevel: Record<ChannelKey, number>;
+  private wantedOn: Partial<Record<ChannelKey, boolean>> = {};
   private guarded = false;
 
+  constructor() {
+    this.wantedLevel = Object.fromEntries(ALL_CHANNELS.map((k) => [k, 0])) as Record<
+      ChannelKey,
+      number
+    >;
+  }
+
+  /* Context creation happens only here, and wake() is the only caller
+     that may run inside a gesture — so the context is never born
+     suspended-and-orphaned by an effect. */
   private ensure(): AudioContext | null {
     if (this.ctx) return this.ctx.state === "closed" ? null : this.ctx;
     try {
@@ -52,7 +73,7 @@ export class AmbientEngine {
       if (!AC) return null;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = this.enabled ? 1 : 0;
+      this.master.gain.value = 1;
       this.master.connect(this.ctx.destination);
       this.installGuards();
     } catch {
@@ -65,28 +86,59 @@ export class AmbientEngine {
   private installGuards() {
     if (this.guarded || !this.ctx) return;
     this.guarded = true;
-    this.ctx.addEventListener("statechange", () => {
-      if (this.enabled && this.ctx && this.ctx.state === "suspended") {
+    const revive = () => {
+      if (this.anyOn() && this.ctx && this.ctx.state === "suspended") {
         void this.ctx.resume();
       }
-    });
+    };
+    this.ctx.addEventListener("statechange", revive);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden && this.enabled && this.ctx?.state === "suspended") {
-        void this.ctx.resume();
-      }
+      if (!document.hidden) revive();
     });
   }
 
+  private anyOn(): boolean {
+    return Object.values(this.wantedOn).some(Boolean);
+  }
+
   /**
-   * Call from inside a user gesture. Creates the context if needed and
-   * resumes it while the activation window is still open.
+   * The only entry point that creates/resumes audio. Call it from
+   * inside a user gesture (click, drag, key press). Returns true when
+   * a usable context exists.
    */
-  wake(): void {
+  wake(): boolean {
     const ctx = this.ensure();
-    if (!ctx) return;
-    if (ctx.state === "suspended" || (ctx.state as string) === "interrupted") {
-      void ctx.resume();
-    }
+    if (!ctx) return false;
+    if (ctx.state !== "running") void ctx.resume();
+    ALL_CHANNELS.forEach((k) => {
+      if (this.wantedOn[k]) this.materialise(k);
+    });
+    return true;
+  }
+
+  /* Build the channel (once) and ramp it to its intended level. */
+  private materialise(key: ChannelKey) {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === "closed") return;
+    if (!this.built[key]) this.build(key);
+    const g = this.gains[key];
+    if (!g) return;
+    const v = Math.min(1, Math.max(0, this.wantedLevel[key] ?? 0));
+    const target = this.wantedOn[key] ? Math.pow(v, TAPER) * MAX_GAIN[key] : 0;
+    g.gain.setTargetAtTime(target, ctx.currentTime, 0.15);
+  }
+
+  /** Switch a channel on/off. Safe any time — before the first gesture
+      it only records intent; wake() applies it later. */
+  setChannelOn(key: ChannelKey, on: boolean) {
+    this.wantedOn[key] = on;
+    if (this.ctx && this.ctx.state !== "closed") this.materialise(key);
+  }
+
+  /** Set a channel's fader (0..1). Safe any time. */
+  setLevel(key: ChannelKey, v01: number) {
+    this.wantedLevel[key] = Math.min(1, Math.max(0, v01));
+    if (this.built[key]) this.materialise(key);
   }
 
   /* ------------------------------------------------ noise colors */
@@ -103,7 +155,13 @@ export class AmbientEngine {
       for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
     } else if (kind === "pink") {
       /* Paul Kellet's economical pink-noise filter (−3 dB/oct) */
-      let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+      let b0 = 0,
+        b1 = 0,
+        b2 = 0,
+        b3 = 0,
+        b4 = 0,
+        b5 = 0,
+        b6 = 0;
       for (let i = 0; i < len; i++) {
         const w = Math.random() * 2 - 1;
         b0 = 0.99886 * b0 + w * 0.0555179;
@@ -204,23 +262,6 @@ export class AmbientEngine {
     src.start();
     this.gains[key] = g;
     this.built[key] = true;
-  }
-
-  setLevel(key: ChannelKey, v01: number) {
-    const ctx = this.ensure();
-    if (!ctx) return;
-    if (!this.built[key]) this.build(key);
-    const g = this.gains[key];
-    if (!g) return;
-    const v = Math.min(1, Math.max(0, v01));
-    g.gain.setTargetAtTime(Math.pow(v, TAPER) * MAX_GAIN[key], ctx.currentTime, 0.15);
-  }
-
-  setEnabled(on: boolean) {
-    this.enabled = on;
-    const ctx = this.ensure();
-    if (!ctx || !this.master) return;
-    this.master.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.25);
   }
 }
 

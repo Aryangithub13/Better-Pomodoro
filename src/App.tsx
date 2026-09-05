@@ -6,7 +6,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { ambient, type ChannelKey } from "./audio";
+import { ambient, type ChannelKey, type NoiseColor } from "./audio";
+import { NoisePanel } from "./NoisePanel";
 import { loadLog, recordFocus, type LogEntry } from "./stats";
 import { AmbientCanvas } from "./AmbientCanvas";
 import { Plant, type PlantPhase } from "./Plant";
@@ -31,6 +32,8 @@ interface Settings {
   sound: boolean;
   pipAuto: boolean;
   ambienceOn: boolean;
+  noiseColor: NoiseColor | null;
+  noiseVolume: number;
   rain: number;
   drone: number;
   wind: number;
@@ -52,6 +55,8 @@ const DEFAULTS: Settings = {
   sound: true,
   pipAuto: false,
   ambienceOn: false,
+  noiseColor: null,
+  noiseVolume: 0.5,
   rain: 0.45,
   drone: 0.25,
   wind: 0.3,
