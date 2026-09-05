@@ -50,7 +50,7 @@ const LIMITS: Record<"focus" | "short" | "long" | "rounds", [number, number]> = 
   focus: [1, 90],
   short: [1, 30],
   long: [1, 45],
-  rounds: [1, 8],
+  rounds: [1, 15],
 };
 
 const LABEL: Record<Mode, string> = {
