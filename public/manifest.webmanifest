@@ -1,0 +1,14 @@
+{
+  "name": "PF-25 — Split-Flap Focus Timer",
+  "short_name": "PF-25",
+  "description": "A monochrome split-flap pomodoro instrument.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#101010",
+  "theme_color": "#141414",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
