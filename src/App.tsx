@@ -37,11 +37,6 @@ interface Settings {
   rain: number;
   drone: number;
   wind: number;
-  white: number;
-  pink: number;
-  brown: number;
-  blue: number;
-  violet: number;
   ytId: string | null;
   ytTitle: string | null;
   ytVol: number;
@@ -60,11 +55,6 @@ const DEFAULTS: Settings = {
   rain: 0.45,
   drone: 0.25,
   wind: 0.3,
-  white: 0,
-  pink: 0,
-  brown: 0,
-  blue: 0,
-  violet: 0,
   ytId: null,
   ytTitle: null,
   ytVol: 0.7,
@@ -83,22 +73,13 @@ const LABEL: Record<Mode, string> = {
   long: "Long break",
 };
 
-const SCENE: { key: ChannelKey; label: string }[] = [
+const SCENE: { key: "rain" | "drone" | "wind"; label: string }[] = [
   { key: "rain", label: "Rain" },
   { key: "drone", label: "Deep drone" },
   { key: "wind", label: "Wind" },
 ];
 
-/* the noise color column — every shade synthesized in-browser */
-const NOISES: { key: ChannelKey; label: string; hint: string }[] = [
-  { key: "white", label: "White", hint: "bright hiss" },
-  { key: "pink", label: "Pink", hint: "even, natural" },
-  { key: "brown", label: "Brown", hint: "deep rumble" },
-  { key: "blue", label: "Blue", hint: "crisp, present" },
-  { key: "violet", label: "Violet", hint: "airy, sharp" },
-];
-
-const AMBIENT_KEYS = [...SCENE, ...NOISES];
+const NOISE_COLORS: NoiseColor[] = ["white", "pink", "brown", "blue", "violet"];
 
 const STORAGE_KEY = "pomo.pf25.v1";
 
@@ -129,12 +110,31 @@ function loadSettings(): Settings {
       s.sound = j.sound !== false;
       s.pipAuto = j.pipAuto === true;
       s.ambienceOn = j.ambienceOn === true;
-      (
-        ["rain", "drone", "wind", "white", "pink", "brown", "blue", "violet"] as const
-      ).forEach((k) => {
+      (["rain", "drone", "wind"] as const).forEach((k) => {
         const v = j[k];
         if (typeof v === "number" && Number.isFinite(v)) s[k] = clamp01(v);
       });
+      /* focus noise — one color at a time */
+      if (j.noiseColor && NOISE_COLORS.includes(j.noiseColor)) s.noiseColor = j.noiseColor;
+      if (typeof j.noiseVolume === "number" && Number.isFinite(j.noiseVolume))
+        s.noiseVolume = clamp01(j.noiseVolume);
+      /* migrate the older per-color sliders into the single selection,
+         keeping whichever shade the listener had dialed loudest */
+      if (s.noiseColor === null) {
+        let best: NoiseColor | null = null;
+        let bestV = 0;
+        NOISE_COLORS.forEach((k) => {
+          const v = (j as Record<string, unknown>)[k];
+          if (typeof v === "number" && Number.isFinite(v) && v > bestV) {
+            bestV = v;
+            best = k;
+          }
+        });
+        if (best !== null) {
+          s.noiseColor = best;
+          s.noiseVolume = clamp01(bestV);
+        }
+      }
       if (typeof j.ytId === "string" && /^[\w-]{11}$/.test(j.ytId)) s.ytId = j.ytId;
       if (typeof j.ytTitle === "string" && j.ytTitle.length <= 140) s.ytTitle = j.ytTitle;
       if (typeof j.ytVol === "number" && Number.isFinite(j.ytVol)) s.ytVol = clamp01(j.ytVol);
@@ -283,6 +283,19 @@ const CloseIcon = () => (
 const MinusIcon = () => icon("M5 12h14");
 const PlusIcon = () => icon("M12 5v14M5 12h14");
 const StatsIcon = () => icon("M6 20v-5", <path d="M12 20v-9M18 20V7" />);
+/* spectrum glyph — a slope that reads as "coloured noise" */
+const NoiseIcon = () => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    aria-hidden="true"
+  >
+    <path d="M4 8l2.6 8L9.4 5l2.8 14L15 8.5 17.4 15 20 10.5" />
+  </svg>
+);
 const PipIcon = () => (
   <svg
     viewBox="0 0 24 24"
@@ -309,6 +322,7 @@ export default function App() {
   const [completedFocus, setCompletedFocus] = useState(0);
   const [scrimOpen, setScrimOpen] = useState(false);
   const [statsOpen, setStatsOpen] = useState(false);
+  const [noiseOpen, setNoiseOpen] = useState(false);
   const [log, setLog] = useState<LogEntry[]>(loadLog);
   const [everRun, setEverRun] = useState(false);
   const [plantPhase, setPlantPhase] = useState<PlantPhase>("grow");
@@ -501,21 +515,37 @@ export default function App() {
     }
   }, []);
 
-  const setMixer = useCallback((key: ChannelKey, v01: number) => {
+  const setMixer = useCallback((key: "rain" | "drone" | "wind", v01: number) => {
     ambient.wake(); /* dragging a fader is a gesture — arm the audio here */
     setSettings((s) => ({ ...s, [key]: clamp01(v01) }));
+  }, []);
+
+  /* focus noise — selecting or moving the fader happens inside a click
+     or drag, so waking here guarantees the sound actually starts */
+  const selectNoise = useCallback((c: NoiseColor | null) => {
+    ambient.wake();
+    setSettings((s) => ({ ...s, noiseColor: c }));
+  }, []);
+  const setNoiseVol = useCallback((v01: number) => {
+    ambient.wake();
+    setSettings((s) => ({ ...s, noiseVolume: clamp01(v01) }));
   }, []);
 
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
 
-  /* ambience follows the persisted mix */
+  /* ambience follows the persisted mix — intent only; the engine stays
+     silent until a gesture calls wake() */
   useEffect(() => {
-    ambient.setEnabled(settings.ambienceOn);
-  }, [settings.ambienceOn]);
-  useEffect(() => {
-    AMBIENT_KEYS.forEach(({ key }) => ambient.setLevel(key, settings[key]));
+    SCENE.forEach(({ key }) => {
+      ambient.setLevel(key, settings[key]);
+      ambient.setChannelOn(key, settings.ambienceOn && settings[key] > 0);
+    });
+    NOISE_COLORS.forEach((k) => {
+      ambient.setLevel(k, settings.noiseVolume);
+      ambient.setChannelOn(k, settings.noiseColor === k);
+    });
   }, [settings]);
 
   /* ------------------------------ side channels ------------------------------ */
@@ -552,11 +582,18 @@ export default function App() {
         if (tag === "button") return; /* let a focused button keep native space */
         e.preventDefault();
         toggle();
-      } else if ((e.key === "r" || e.key === "R") && !typing && !scrimOpen && !statsOpen) {
+      } else if (
+        (e.key === "r" || e.key === "R") &&
+        !typing &&
+        !scrimOpen &&
+        !statsOpen &&
+        !noiseOpen
+      ) {
         reset();
       } else if (e.key === "Escape") {
         setScrimOpen(false);
         setStatsOpen(false);
+        setNoiseOpen(false);
       }
     };
     document.addEventListener("keydown", onKey);
@@ -741,6 +778,15 @@ export default function App() {
           >
             <StatsIcon />
           </button>
+          <button
+            className={"ctl" + (settings.noiseColor ? " live" : "")}
+            onClick={() => setNoiseOpen(true)}
+            aria-label="Focus noise"
+            aria-expanded={noiseOpen}
+            title="Focus noise"
+          >
+            <NoiseIcon />
+          </button>
           <button className="ctl" onClick={reset} aria-label="Reset timer" title="Reset (R)">
             <ResetIcon />
           </button>
@@ -889,33 +935,6 @@ export default function App() {
             ))}
 
             <div className="p-sub">
-              <h3>Noise color</h3>
-            </div>
-
-            {NOISES.map(({ key, label, hint }) => (
-              <div className="row mix-row" key={key}>
-                <span className="lbl">
-                  {label}
-                  <span className="hint">{hint}</span>
-                </span>
-                <div className="mixer">
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(settings[key] * 100)}
-                    onChange={(e) => setMixer(key, Number(e.target.value) / 100)}
-                    aria-label={`${label} noise volume`}
-                  />
-                  <output className="mix-val">
-                    {Math.round(settings[key] * 100)}
-                    <span className="u">%</span>
-                  </output>
-                </div>
-              </div>
-            ))}
-
-            <div className="p-sub">
               <h3>YouTube audio</h3>
             </div>
 
@@ -950,6 +969,16 @@ export default function App() {
 
         {/* focus log */}
         <StatsPanel open={statsOpen} log={log} onClose={() => setStatsOpen(false)} />
+
+        {/* focus noise — the main-screen noise tab */}
+        <NoisePanel
+          open={noiseOpen}
+          color={settings.noiseColor}
+          volume={settings.noiseVolume}
+          onSelect={selectNoise}
+          onVolume={setNoiseVol}
+          onClose={() => setNoiseOpen(false)}
+        />
       </main>
     </>
   );

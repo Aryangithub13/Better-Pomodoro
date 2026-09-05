@@ -944,6 +944,108 @@ body.running .ctl.primary .ic-play {
   height: 17px;
 }
 
+/* ========================================================== focus noise */
+.noise-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 2px;
+}
+.noise-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 11px 14px;
+  cursor: pointer;
+  text-align: left;
+  background: #161616;
+  border: 1px solid #2b2b2b;
+  border-radius: 10px;
+  color: #b5b5b5;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.noise-row:hover {
+  border-color: #4a4a4a;
+  color: #e8e8e8;
+}
+.noise-row:focus-visible {
+  outline: 1px solid var(--text-hi);
+  outline-offset: 2px;
+}
+.noise-row.on {
+  border-color: #7a7a7a;
+  background: #1f1f1f;
+  color: #ececec;
+}
+.noise-row .spec {
+  width: 26px;
+  height: 13px;
+  flex: none;
+}
+.noise-row .spec path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+.noise-row.on .spec path {
+  opacity: 1;
+}
+.noise-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.noise-name b {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.noise-name i {
+  font-style: normal;
+  font-size: 10.5px;
+  color: #6e6e6e;
+}
+.radio {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  border-radius: 50%;
+  border: 1px solid #4a4a4a;
+  position: relative;
+  transition: border-color 0.15s ease;
+}
+.noise-row.on .radio {
+  border-color: #d0d0d0;
+}
+.noise-row.on .radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: #e8e8e8;
+}
+.noise-vol input:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* a selected noise lights a small dot on its control button */
+.ctl.live::after {
+  content: "";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #d8d8d8;
+}
+
 /* ========================================================== noise hints + youtube slot */
 .lbl .hint {
   display: block;
