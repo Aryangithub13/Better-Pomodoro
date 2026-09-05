@@ -33,6 +33,14 @@ interface Settings {
   rain: number;
   drone: number;
   wind: number;
+  white: number;
+  pink: number;
+  brown: number;
+  blue: number;
+  violet: number;
+  ytId: string | null;
+  ytTitle: string | null;
+  ytVolume: number;
 }
 
 const DEFAULTS: Settings = {
