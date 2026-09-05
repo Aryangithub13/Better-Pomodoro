@@ -8,6 +8,7 @@ import { useEffect, useRef, useState } from "react";
 
 interface YTPlayerIface {
   setVolume(v: number): void;
+  playVideo(): void;
   destroy(): void;
 }
 
@@ -167,7 +168,12 @@ export function YoutubePlayer({
           onReady: () => {
             if (cancelled) return;
             setReady(true);
-            playerRef.current?.setVolume(Math.round(volRef.current * 100));
+            const p = playerRef.current;
+            if (!p) return;
+            p.setVolume(Math.round(volRef.current * 100));
+            /* Load was pressed moments ago — still inside the activation
+               window, so unmuted playback is allowed to start. */
+            p.playVideo();
           },
         },
       });

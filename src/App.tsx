@@ -372,8 +372,8 @@ export default function App() {
       o.type = "sine";
       o.frequency.value = freq;
       g.gain.setValueAtTime(0.0001, t0 + at);
-      g.gain.exponentialRampToValueAtTime(0.055, t0 + at + 0.025);
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.55);
+      g.gain.exponentialRampToValueAtTime(0.13, t0 + at + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + 0.6);
       o.connect(g);
       g.connect(ctx.destination);
       o.start(t0 + at);
@@ -428,6 +428,7 @@ export default function App() {
 
   const play = useCallback(() => {
     ensureAudio();
+    ambient.wake(); /* starting a session also un-suspends the ambience */
     setEverRun(true);
     const s = stateRef.current;
     const rem = s.remaining <= 0 ? s.total : s.remaining;
@@ -496,6 +497,7 @@ export default function App() {
   }, []);
 
   const setMixer = useCallback((key: ChannelKey, v01: number) => {
+    ambient.wake(); /* dragging a fader is a gesture — arm the audio here */
     setSettings((s) => ({ ...s, [key]: clamp01(v01) }));
   }, []);
 
@@ -851,7 +853,10 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={settings.ambienceOn}
-                  onChange={(e) => setSettings((s) => ({ ...s, ambienceOn: e.target.checked }))}
+                  onChange={(e) => {
+                    ambient.wake(); /* resume inside the click's activation window */
+                    setSettings((s) => ({ ...s, ambienceOn: e.target.checked }));
+                  }}
                 />
                 <span className="tr" />
                 <span className="sr-only">Ambient sound on</span>

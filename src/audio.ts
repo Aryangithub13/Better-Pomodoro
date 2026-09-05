@@ -10,7 +10,11 @@
             brown (−6 dB/oct integrator), blue (+3 dB/oct tilt),
             violet (+6 dB/oct derivative).
 
-   Everything stays inside the neutral, quiet register.
+   Autoplay policies are hostile: the context is created lazily and
+   `wake()` must be called from inside a user gesture (a click or
+   drag) so resume() lands inside the activation window. A
+   statechange/visibility guard re-wakes it after device sleep or
+   tab backgrounding.
    ================================================================ */
 
 export type SceneKey = "rain" | "drone" | "wind";
@@ -18,15 +22,17 @@ export type NoiseColor = "white" | "pink" | "brown" | "blue" | "violet";
 export type ChannelKey = SceneKey | NoiseColor;
 
 const MAX_GAIN: Record<ChannelKey, number> = {
-  rain: 0.5,
-  drone: 0.85,
-  wind: 0.6,
-  white: 0.2,
-  pink: 0.3,
-  brown: 0.85,
-  blue: 0.14,
-  violet: 0.09,
+  rain: 0.9,
+  drone: 1.1,
+  wind: 0.9,
+  white: 0.5,
+  pink: 0.6,
+  brown: 1.1,
+  blue: 0.35,
+  violet: 0.22,
 };
+
+const TAPER = 1.6; /* softer than squared — mid-slider is clearly audible */
 
 export class AmbientEngine {
   private ctx: AudioContext | null = null;
@@ -35,12 +41,10 @@ export class AmbientEngine {
   private built: Partial<Record<ChannelKey, boolean>> = {};
   private buffers: Partial<Record<NoiseColor, AudioBuffer>> = {};
   private enabled = false;
+  private guarded = false;
 
   private ensure(): AudioContext | null {
-    if (this.ctx) {
-      if (this.ctx.state === "suspended") void this.ctx.resume();
-      return this.ctx;
-    }
+    if (this.ctx) return this.ctx.state === "closed" ? null : this.ctx;
     try {
       const AC =
         window.AudioContext ??
@@ -50,10 +54,39 @@ export class AmbientEngine {
       this.master = this.ctx.createGain();
       this.master.gain.value = this.enabled ? 1 : 0;
       this.master.connect(this.ctx.destination);
+      this.installGuards();
     } catch {
       this.ctx = null;
     }
     return this.ctx;
+  }
+
+  /* re-arm after suspend (device sleep, background tab, interruptions) */
+  private installGuards() {
+    if (this.guarded || !this.ctx) return;
+    this.guarded = true;
+    this.ctx.addEventListener("statechange", () => {
+      if (this.enabled && this.ctx && this.ctx.state === "suspended") {
+        void this.ctx.resume();
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (!document.hidden && this.enabled && this.ctx?.state === "suspended") {
+        void this.ctx.resume();
+      }
+    });
+  }
+
+  /**
+   * Call from inside a user gesture. Creates the context if needed and
+   * resumes it while the activation window is still open.
+   */
+  wake(): void {
+    const ctx = this.ensure();
+    if (!ctx) return;
+    if (ctx.state === "suspended" || (ctx.state as string) === "interrupted") {
+      void ctx.resume();
+    }
   }
 
   /* ------------------------------------------------ noise colors */
@@ -133,7 +166,7 @@ export class AmbientEngine {
       const lfo = ctx.createOscillator();
       lfo.frequency.value = 0.11;
       const lfoAmt = ctx.createGain();
-      lfoAmt.gain.value = 0.08;
+      lfoAmt.gain.value = 0.1;
       lfo.connect(lfoAmt);
       lfoAmt.connect(g.gain);
       lfo.start();
@@ -180,15 +213,14 @@ export class AmbientEngine {
     const g = this.gains[key];
     if (!g) return;
     const v = Math.min(1, Math.max(0, v01));
-    /* perceptual taper */
-    g.gain.setTargetAtTime(v * v * MAX_GAIN[key], ctx.currentTime, 0.2);
+    g.gain.setTargetAtTime(Math.pow(v, TAPER) * MAX_GAIN[key], ctx.currentTime, 0.15);
   }
 
   setEnabled(on: boolean) {
     this.enabled = on;
     const ctx = this.ensure();
     if (!ctx || !this.master) return;
-    this.master.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.3);
+    this.master.gain.setTargetAtTime(on ? 1 : 0, ctx.currentTime, 0.25);
   }
 }
 
