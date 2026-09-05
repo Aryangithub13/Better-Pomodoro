@@ -46,6 +46,12 @@ work; the module script and the service worker both need an `http(s)` origin.
 
 ## Notes
 
+- **Floating timer** — the PiP button (top-right of the clock frame) pops out a
+  miniature of the instrument that stays on top of other apps. In Chromium it
+  uses the Document Picture-in-Picture API: real flipping digits, the plant,
+  and working play/pause/reset/skip controls. Firefox and Safari fall back to a
+  canvas-rendered clock with simulated flap animation. Enable
+  *Settings → Auto pop-out on start* to open it whenever a session begins.
 - The PWA (manifest + service worker) activates on first visit over `http(s)`;
   subsequent visits work fully offline.
 - All data — settings, round count, focus log — is stored in `localStorage`

@@ -28,6 +28,7 @@ interface Settings {
   long: number;
   rounds: number;
   sound: boolean;
+  pipAuto: boolean;
   ambienceOn: boolean;
   rain: number;
   drone: number;
@@ -40,6 +41,7 @@ const DEFAULTS: Settings = {
   long: 15,
   rounds: 4,
   sound: true,
+  pipAuto: false,
   ambienceOn: false,
   rain: 0.45,
   drone: 0.25,
@@ -92,6 +94,7 @@ function loadSettings(): Settings {
         s.rounds = clamp(Math.round(j.longEvery), LIMITS.rounds[0], LIMITS.rounds[1]);
       }
       s.sound = j.sound !== false;
+      s.pipAuto = j.pipAuto === true;
       s.ambienceOn = j.ambienceOn === true;
       (["rain", "drone", "wind"] as const).forEach((k) => {
         const v = j[k];
@@ -400,6 +403,7 @@ export default function App() {
     endAtRef.current = Date.now() + rem;
     setRemaining(rem);
     setRunning(true);
+    if (s.settings.pipAuto) pipOpenRef.current();
   }, [ensureAudio]);
 
   const pause = useCallback(() => {
@@ -412,18 +416,38 @@ export default function App() {
     else play();
   }, [pause, play]);
 
+  /* leaving a focus block early wilts the plant */
+  const abandonPlant = useCallback(() => {
+    const s = stateRef.current;
+    if (s.mode === "focus") {
+      const p = s.total > 0 ? 1 - s.remaining / s.total : 0;
+      setPlantPhase(p > 0.06 && s.plantPhase !== "bloom" ? "wilt" : "grow");
+    }
+  }, []);
+
   const reset = useCallback(() => {
     setRunning(false);
     const s = stateRef.current;
     const t = s.settings[s.mode] * 60000;
     setTotal(t);
     setRemaining(t);
-    if (s.mode === "focus") {
-      const p = s.total > 0 ? 1 - s.remaining / s.total : 0;
-      setPlantPhase(p > 0.06 && s.plantPhase !== "bloom" ? "wilt" : "grow");
-    }
+    abandonPlant();
     announce(`${LABEL[s.mode]} reset. ${s.settings[s.mode]} minutes ready.`);
-  }, []);
+  }, [abandonPlant]);
+
+  /* skip — advance without completing: no chime, no log entry, no round credit */
+  const skip = useCallback(() => {
+    setRunning(false);
+    const s = stateRef.current;
+    if (s.mode === "focus") abandonPlant();
+    else setPlantPhase("grow");
+    const nextMode: Mode = s.mode === "focus" ? "short" : "focus";
+    const t = s.settings[nextMode] * 60000;
+    setMode(nextMode);
+    setTotal(t);
+    setRemaining(t);
+    announce(`${LABEL[nextMode]} — skipped ahead. Press space to start.`);
+  }, [abandonPlant]);
 
   /* ------------------------------ settings ------------------------------ */
   const changeSetting = useCallback((key: keyof typeof LIMITS, delta: number) => {
@@ -573,12 +597,39 @@ export default function App() {
 
   const plantProgress = mode === "focus" ? (total > 0 ? 1 - remaining / total : 0) : 1;
 
-  const pip = usePip({
-    mm,
-    ss,
-    label: LABEL[mode],
-    progress: progress / 100,
-    running,
+  const roundNo = mode === "long" ? settings.rounds : (completedFocus % settings.rounds) + 1;
+
+  /* action bridge so the floating window always drives the latest handlers */
+  const pipActionsRef = useRef({ toggle, reset, skip });
+  useEffect(() => {
+    pipActionsRef.current = { toggle, reset, skip };
+  });
+
+  const pip = usePip(
+    {
+      mm,
+      ss,
+      label: LABEL[mode],
+      round: roundNo,
+      rounds: settings.rounds,
+      progress: progress / 100,
+      running,
+      mode,
+      plant: plantProgress,
+    },
+    {
+      onToggle: () => pipActionsRef.current.toggle(),
+      onReset: () => pipActionsRef.current.reset(),
+      onSkip: () => pipActionsRef.current.skip(),
+    },
+  );
+
+  /* auto pop-out fires from inside the gesture that starts playback */
+  const pipOpenRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    pipOpenRef.current = () => {
+      if (!pip.active) void pip.open();
+    };
   });
 
   const numericRows = [
@@ -602,8 +653,8 @@ export default function App() {
                 className="pip-btn"
                 onClick={() => void pip.toggle()}
                 aria-pressed={pip.active}
-                aria-label="Floating timer window"
-                title="Floating window"
+                aria-label={pip.active ? "Close floating timer" : "Pop out floating timer"}
+                title={pip.active ? "Close floating timer" : "Pop out the mini timer"}
               >
                 <PipIcon />
               </button>
@@ -745,6 +796,21 @@ export default function App() {
                 <span className="sr-only">Signal tone on session end</span>
               </label>
             </div>
+
+            {pip.supported && (
+              <div className="row">
+                <span className="lbl">Auto pop-out on start</span>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={settings.pipAuto}
+                    onChange={(e) => setSettings((s) => ({ ...s, pipAuto: e.target.checked }))}
+                  />
+                  <span className="tr" />
+                  <span className="sr-only">Open the floating timer window when a session starts</span>
+                </label>
+              </div>
+            )}
 
             <div className="p-sub">
               <h3>Ambience</h3>
