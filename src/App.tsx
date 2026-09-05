@@ -19,17 +19,18 @@ interface Settings {
   focus: number;
   short: number;
   long: number;
-  longEvery: number;
+  /* one round = one focus + one short break; the long break follows the final round */
+  rounds: number;
   sound: boolean;
 }
 
-const DEFAULTS: Settings = { focus: 25, short: 5, long: 15, longEvery: 4, sound: true };
+const DEFAULTS: Settings = { focus: 25, short: 5, long: 15, rounds: 4, sound: true };
 
 const LIMITS: Record<keyof Omit<Settings, "sound">, [number, number]> = {
   focus: [1, 90],
   short: [1, 30],
   long: [1, 45],
-  longEvery: [2, 8],
+  rounds: [1, 8],
 };
 
 const LABEL: Record<Mode, string> = {
@@ -48,13 +49,17 @@ function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const j = JSON.parse(raw) as Partial<Settings>;
+      const j = JSON.parse(raw) as Partial<Settings> & { longEvery?: number };
       (Object.keys(LIMITS) as (keyof typeof LIMITS)[]).forEach((k) => {
         const v = j[k];
         if (typeof v === "number" && Number.isFinite(v)) {
           s[k] = clamp(Math.round(v), LIMITS[k][0], LIMITS[k][1]);
         }
       });
+      /* older builds stored the cycle length as "longEvery" — carry it over */
+      if (j.rounds == null && typeof j.longEvery === "number" && Number.isFinite(j.longEvery)) {
+        s.rounds = clamp(Math.round(j.longEvery), LIMITS.rounds[0], LIMITS.rounds[1]);
+      }
       s.sound = j.sound !== false;
     }
   } catch {
@@ -273,8 +278,12 @@ export default function App() {
     let nextMode: Mode;
     let nextCompleted = s.completedFocus;
     if (s.mode === "focus") {
+      /* a round is focus + rest, so every focus is followed by its short break */
       nextCompleted += 1;
-      nextMode = nextCompleted % s.settings.longEvery === 0 ? "long" : "short";
+      nextMode = "short";
+    } else if (s.mode === "short") {
+      /* the long break comes only after the final round's rest is done */
+      nextMode = nextCompleted % s.settings.rounds === 0 ? "long" : "focus";
     } else {
       nextMode = "focus";
     }
@@ -283,7 +292,16 @@ export default function App() {
     setMode(nextMode);
     setTotal(newTotal);
     setRemaining(newTotal);
-    announce(`${LABEL[nextMode]}. ${s.settings[nextMode]} minutes. Press space to start.`);
+    const r = s.settings.rounds;
+    const roundNow =
+      nextMode === "short"
+        ? ((nextCompleted - 1) % r) + 1
+        : nextMode === "long"
+          ? r
+          : (nextCompleted % r) + 1;
+    announce(
+      `${LABEL[nextMode]} — round ${roundNow} of ${r}. ${s.settings[nextMode]} minutes. Press space to start.`,
+    );
   }, [chime]);
 
   useEffect(() => {
@@ -458,14 +476,21 @@ export default function App() {
   const shown = bootChars ?? chars;
   const progress = total > 0 ? (1 - remaining / total) * 100 : 0;
 
-  const dotsCount = settings.longEvery;
-  const dotsFilled = mode === "long" ? dotsCount : completedFocus % dotsCount;
+  /* round bookkeeping — one round = focus + short break */
+  const rounds = settings.rounds;
+  const currentRound =
+    mode === "focus"
+      ? (completedFocus % rounds) + 1
+      : mode === "short"
+        ? ((((completedFocus - 1) % rounds) + rounds) % rounds) + 1
+        : rounds;
+  const dotsFilled = mode === "focus" ? currentRound - 1 : currentRound;
 
   const numericRows = [
     { key: "focus" as const, label: "Focus length", unit: "min" },
     { key: "short" as const, label: "Short break", unit: "min" },
+    { key: "rounds" as const, label: "Rounds", unit: "" },
     { key: "long" as const, label: "Long break", unit: "min" },
-    { key: "longEvery" as const, label: "Long break after", unit: "sess" },
   ];
 
   return (
@@ -491,9 +516,12 @@ export default function App() {
       <div className="readout">
         <span>{LABEL[mode]}</span>
         <span className="dots" aria-hidden="true">
-          {Array.from({ length: dotsCount }, (_, i) => (
+          {Array.from({ length: rounds }, (_, i) => (
             <i key={i} className={i < dotsFilled ? "on" : ""} />
           ))}
+        </span>
+        <span className="roundtag">
+          round {currentRound} / {rounds}
         </span>
       </div>
 
@@ -567,7 +595,7 @@ export default function App() {
                   </button>
                   <output>
                     {val}
-                    <span className="u">{unit}</span>
+                    {unit ? <span className="u">{unit}</span> : null}
                   </output>
                   <button
                     className="stp"
@@ -596,6 +624,7 @@ export default function App() {
           </div>
 
           <p className="p-note">
+            One round = focus + short break; the long break follows the final round.
             Lengths apply to the next session of that kind. Saved on this device.
           </p>
         </div>
