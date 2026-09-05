@@ -1,8 +1,10 @@
 # PF-25 — Split-Flap Focus Timer
 
 A monochrome pomodoro instrument: a mechanical split-flap countdown, configurable
-rounds, an ambient noise mixer, a growing plant, a local focus log, wake lock,
-Picture-in-Picture, and offline PWA support. Built with React + Vite + TypeScript.
+rounds, an ambient mixer (scene layers plus white/pink/brown/blue/violet noise,
+all synthesized in-browser), a YouTube audio slot, a growing plant, a local focus
+log, wake lock, an interactive floating Picture-in-Picture window, and offline
+PWA support. Built with React + Vite + TypeScript.
 
 ## Run it on localhost
 

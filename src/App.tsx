@@ -13,6 +13,7 @@ import { Plant, type PlantPhase } from "./Plant";
 import { StatsPanel } from "./StatsPanel";
 import { usePip } from "./usePip";
 import { useWakeLock } from "./useWakeLock";
+import { YtInput, YoutubePlayer } from "./YoutubePlayer";
 
 /* ================================================================
    PF-25 — a split-flap pomodoro instrument.
@@ -40,7 +41,7 @@ interface Settings {
   violet: number;
   ytId: string | null;
   ytTitle: string | null;
-  ytVolume: number;
+  ytVol: number;
 }
 
 const DEFAULTS: Settings = {
@@ -54,6 +55,14 @@ const DEFAULTS: Settings = {
   rain: 0.45,
   drone: 0.25,
   wind: 0.3,
+  white: 0,
+  pink: 0,
+  brown: 0,
+  blue: 0,
+  violet: 0,
+  ytId: null,
+  ytTitle: null,
+  ytVol: 0.7,
 };
 
 const LIMITS: Record<"focus" | "short" | "long" | "rounds", [number, number]> = {
@@ -69,11 +78,22 @@ const LABEL: Record<Mode, string> = {
   long: "Long break",
 };
 
-const MIXER: { key: ChannelKey; label: string }[] = [
+const SCENE: { key: ChannelKey; label: string }[] = [
   { key: "rain", label: "Rain" },
   { key: "drone", label: "Deep drone" },
   { key: "wind", label: "Wind" },
 ];
+
+/* the noise color column — every shade synthesized in-browser */
+const NOISES: { key: ChannelKey; label: string; hint: string }[] = [
+  { key: "white", label: "White", hint: "bright hiss" },
+  { key: "pink", label: "Pink", hint: "even, natural" },
+  { key: "brown", label: "Brown", hint: "deep rumble" },
+  { key: "blue", label: "Blue", hint: "crisp, present" },
+  { key: "violet", label: "Violet", hint: "airy, sharp" },
+];
+
+const AMBIENT_KEYS = [...SCENE, ...NOISES];
 
 const STORAGE_KEY = "pomo.pf25.v1";
 
@@ -104,10 +124,15 @@ function loadSettings(): Settings {
       s.sound = j.sound !== false;
       s.pipAuto = j.pipAuto === true;
       s.ambienceOn = j.ambienceOn === true;
-      (["rain", "drone", "wind"] as const).forEach((k) => {
+      (
+        ["rain", "drone", "wind", "white", "pink", "brown", "blue", "violet"] as const
+      ).forEach((k) => {
         const v = j[k];
         if (typeof v === "number" && Number.isFinite(v)) s[k] = clamp01(v);
       });
+      if (typeof j.ytId === "string" && /^[\w-]{11}$/.test(j.ytId)) s.ytId = j.ytId;
+      if (typeof j.ytTitle === "string" && j.ytTitle.length <= 140) s.ytTitle = j.ytTitle;
+      if (typeof j.ytVol === "number" && Number.isFinite(j.ytVol)) s.ytVol = clamp01(j.ytVol);
     }
   } catch {
     /* private mode — run on defaults */
@@ -483,8 +508,8 @@ export default function App() {
     ambient.setEnabled(settings.ambienceOn);
   }, [settings.ambienceOn]);
   useEffect(() => {
-    MIXER.forEach(({ key }) => ambient.setLevel(key, settings[key]));
-  }, [settings.rain, settings.drone, settings.wind]);
+    AMBIENT_KEYS.forEach(({ key }) => ambient.setLevel(key, settings[key]));
+  }, [settings]);
 
   /* ------------------------------ side channels ------------------------------ */
   useEffect(() => {
@@ -833,7 +858,7 @@ export default function App() {
               </label>
             </div>
 
-            {MIXER.map(({ key, label }) => (
+            {SCENE.map(({ key, label }) => (
               <div className="row mix-row" key={key}>
                 <span className="lbl">{label}</span>
                 <div className="mixer">
@@ -852,6 +877,59 @@ export default function App() {
                 </div>
               </div>
             ))}
+
+            <div className="p-sub">
+              <h3>Noise color</h3>
+            </div>
+
+            {NOISES.map(({ key, label, hint }) => (
+              <div className="row mix-row" key={key}>
+                <span className="lbl">
+                  {label}
+                  <span className="hint">{hint}</span>
+                </span>
+                <div className="mixer">
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={Math.round(settings[key] * 100)}
+                    onChange={(e) => setMixer(key, Number(e.target.value) / 100)}
+                    aria-label={`${label} noise volume`}
+                  />
+                  <output className="mix-val">
+                    {Math.round(settings[key] * 100)}
+                    <span className="u">%</span>
+                  </output>
+                </div>
+              </div>
+            ))}
+
+            <div className="p-sub">
+              <h3>YouTube audio</h3>
+            </div>
+
+            {settings.ytId ? (
+              <YoutubePlayer
+                videoId={settings.ytId}
+                title={settings.ytTitle}
+                volume={settings.ytVol}
+                onVolume={(v) => setSettings((s) => ({ ...s, ytVol: v }))}
+                onClear={() => setSettings((s) => ({ ...s, ytId: null, ytTitle: null }))}
+              />
+            ) : (
+              <>
+                <YtInput
+                  onLoad={(id, title) =>
+                    setSettings((s) => ({ ...s, ytId: id, ytTitle: title }))
+                  }
+                />
+                <p className="p-note yt-note">
+                  Plays the audio of any YouTube video through the embedded player, even with
+                  the panel closed.
+                </p>
+              </>
+            )}
 
             <p className="p-note">
               One round = focus + short break; the long break follows the final round.
